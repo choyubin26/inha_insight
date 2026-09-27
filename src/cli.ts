@@ -15,11 +15,12 @@ const USAGE = `Usage:
   npm run crawl -- <notice-url>              fetch + parse only (no DB, no AI)
   npm run poc   -- <notice-url> [--reanalyze] fetch -> DB -> AI -> DB -> print
   npm run show  [-- <notice-id>]             print stored notices + latest analysis
-  npm run ingest [-- --source main|aicc|cse|ai|ds|dt|sme[,...]] [--pages N] [--limit N] [--full] [--no-ai] [--upgrade-prompt]
+  npm run ingest [-- --source main|aicc|cse|ai|ds|dt|sme[,...]] [--pages N] [--limit N] [--full] [--no-ai] [--upgrade-prompt] [--max-ai N]
                                              crawl board lists (all sources by default) -> fetch only new posts
                                              (+ known ones posted in the last 7 days or with a date not passed yet;
                                              --full re-fetches all) -> new/updated/duplicate detection -> DB -> AI
-                                             only where needed. --limit counts regular posts; pinned ones are extra`;
+                                             only where needed. --limit counts regular posts; pinned ones are extra.
+                                             --max-ai N caps AI calls for the whole run; the rest stay pending`;
 
 async function main(argv: string[]) {
   const [command, ...rest] = argv;
@@ -58,6 +59,8 @@ async function runIngest(args: string[]) {
   const flag = (name: string) => (value(name) === undefined ? undefined : Number(value(name)));
   const sources = selectSources(value('--source'));
   const pages = flag('--pages') ?? 1;
+  const maxAi = flag('--max-ai');
+  if (maxAi !== undefined && !(Number.isInteger(maxAi) && maxAi >= 0)) throw new UsageError();
   const db = openDb();
   console.log(`[DB] before: ${JSON.stringify(counts(db))}`);
 
@@ -65,7 +68,7 @@ async function runIngest(args: string[]) {
   if (!args.includes('--no-ai')) {
     try {
       provider = createProvider();
-      console.log(`[AI] provider ${provider.name}, model ${provider.model}`);
+      console.log(`[AI] provider ${provider.name}, model ${provider.model}` + (maxAi !== undefined ? `, at most ${maxAi} call(s) this run` : ''));
     } catch (err) {
       console.log(`[AI] disabled for this run: ${(err as Error).message}`);
     }
@@ -90,6 +93,7 @@ async function runIngest(args: string[]) {
     analyze: provider ? (n) => analyzeNotice(n, provider) : null,
     upgradePrompt: args.includes('--upgrade-prompt'),
     full: args.includes('--full'),
+    aiBudget: maxAi !== undefined ? { left: maxAi } : undefined,
     today,
     aiName: provider?.name,
     aiDelayMs: Number(process.env.INGEST_AI_DELAY_MS ?? 4000),

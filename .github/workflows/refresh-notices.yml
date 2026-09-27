@@ -1,0 +1,98 @@
+# Scheduled notice refresh: pull the DB from the "data" branch -> incremental ingest (Gemini, at
+# most 20 AI calls; the rest stay pending for the next run) -> save the DB back to "data" ->
+# rebuild the static site on gh-pages. Any hard failure stops the job before deploying, so the
+# live site keeps its previous snapshot.
+name: Refresh notices
+
+on:
+  schedule:
+    # KST = UTC+9, off the hour: 08:17, 12:47, 18:17 KST. GitHub may start scheduled runs late.
+    - cron: '17 23 * * *'
+    - cron: '47 3 * * *'
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the data and gh-pages branches
+  pages: read     # check that GitHub Pages rebuilt
+
+concurrency:
+  group: refresh-notices
+  cancel-in-progress: false # queue, never kill a run halfway through saving the DB
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # auth is set once, globally, below (the scripts push from fresh repos)
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Configure git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          auth=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $auth"
+
+      - name: Pull DB from the data branch
+        run: bash scripts/data-branch.sh pull
+
+      - name: Ingest (incremental, at most 20 AI calls)
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # Without a key the CLI would quietly run with AI disabled; fail loudly instead.
+          [ -n "$GEMINI_API_KEY" ] || { echo "::error::Repository secret GEMINI_API_KEY is not set"; exit 1; }
+          # exit 2 = finished, but some notice or board failed (listed above); the DB is still
+          # consistent and those notices are retried next run. Anything else non-zero = hard failure.
+          set +e
+          npx tsx src/cli.ts ingest --max-ai 20
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            echo "::warning::Ingest finished with per-notice/board errors (see [DONE] lines); saving and deploying the rest"
+          elif [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+
+      - name: Sanity check DB
+        run: |
+          node -e "
+            const { DatabaseSync } = require('node:sqlite');
+            const db = new DatabaseSync('data/poc.db', { readOnly: true });
+            const n = db.prepare('SELECT COUNT(*) c FROM notices').get().c;
+            const a = db.prepare('SELECT COUNT(*) c FROM notice_analysis').get().c;
+            console.log('[CHECK] notices', n, 'analyses', a);
+            if (n === 0) { console.error('[CHECK] empty DB, refusing to save/deploy'); process.exit(1); }
+          "
+
+      - name: Save DB to the data branch
+        run: bash scripts/data-branch.sh push
+
+      - name: Deploy to gh-pages
+        run: bash scripts/deploy-pages.sh
+
+      - name: Check GitHub Pages rebuild
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha=$(git ls-remote origin refs/heads/gh-pages | cut -f1)
+          for i in $(seq 1 20); do
+            build=$(gh api "repos/$GITHUB_REPOSITORY/pages/builds/latest" --jq '.status + " " + .commit' 2>/dev/null || true)
+            echo "[PAGES] latest build: ${build:-unknown} (gh-pages at $sha)"
+            [ "$build" = "built $sha" ] && exit 0
+            sleep 15
+          done
+          echo "::warning::GitHub Pages did not report a build of $sha within 5 minutes; check Settings > Pages and the pages-build-deployment run"

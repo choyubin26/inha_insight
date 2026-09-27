@@ -84,6 +84,11 @@ export interface IngestDeps {
   onAnalyzed?: (noticeId: number) => void;
   /** AI already stopped earlier (e.g. by a previous source in ingestAll): defer instead of calling it. */
   aiStoppedReason?: string | null;
+  /**
+   * AI calls still allowed in this run (--max-ai), shared by every source in ingestAll. Each call
+   * (success or failure) uses one; at 0 the remaining notices are deferred to the next run.
+   */
+  aiBudget?: { left: number };
 }
 
 export interface IngestStats {
@@ -199,6 +204,10 @@ export async function ingest(deps: IngestDeps): Promise<IngestStats> {
       log(`[PENDING] Notice ${id} ${status === 'known' ? 'stored (not re-fetched)' : 'unchanged'} but has no analysis yet (earlier failure or deferral)`);
     }
 
+    if (deps.analyze && !stats.aiStoppedReason && deps.aiBudget && deps.aiBudget.left <= 0) {
+      stats.aiStoppedReason = 'AI call limit for this run reached (--max-ai)';
+      log(`[AI] Stopping AI calls for this run: ${stats.aiStoppedReason}`);
+    }
     if (!deps.analyze || stats.aiStoppedReason) {
       stats.analysisDeferred++;
       log(`[DEFER] Notice ${id} analysis deferred to next run: ${stats.aiStoppedReason}`);
@@ -206,6 +215,7 @@ export async function ingest(deps: IngestDeps): Promise<IngestStats> {
     }
 
     if (aiCalls++ > 0 && aiDelayMs) await sleep(aiDelayMs);
+    if (deps.aiBudget) deps.aiBudget.left--;
     log(`[AI] Analyzing ${id}`);
     try {
       const result = await deps.analyze(notice);
