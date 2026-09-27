@@ -1,11 +1,15 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { DdayBadge } from '../components/DdayBadge.tsx';
 import { StateMessage } from '../components/StateMessage.tsx';
 import { api, useApi } from '../lib/api.ts';
 import { eventsByDay, monthCells, nextEventAfter, shiftMonth } from '../lib/calendar.ts';
 import { shortDate, todayKst } from '../lib/dates.ts';
+import { noticeEvents, type NoticeEvent } from '../lib/events.ts';
+import { downloadCsvBulk, downloadIcsMulti } from '../lib/ics.ts';
+import { importedEventsByDay, parseIcs, type ImportedEvent } from '../lib/icsImport.ts';
 import { noticeTitle } from '../lib/i18n.ts';
+import { useImportedEvents } from '../lib/importedEvents.tsx';
 import { useLanguage } from '../lib/language.tsx';
 import { useSaved } from '../lib/saved.tsx';
 import { scrollToTarget } from '../lib/smoothScroll.ts';
@@ -13,6 +17,9 @@ import './CalendarPage.css';
 
 const MAX_CHIPS = 3;
 const isDay = (s: string | null): s is string => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+/** A day's calendar entries: either a notice's deadline/event, or a personal event imported from an .ics file. */
+type CalEntry = NoticeEvent | { kind: 'imported'; date: string; imported: ImportedEvent };
 
 /**
  * Month view of application deadlines and event dates.
@@ -36,6 +43,9 @@ export function CalendarPage() {
   const highlight = Number(params.get('notice')) || null;
   const mine = params.get('view') === 'mine';
   const { saved, isSaved } = useSaved();
+  const imported = useImportedEvents();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [toolsMsg, setToolsMsg] = useState<{ error: boolean; text: string } | null>(null);
 
   const update = (next: { month?: string; date?: string | null; notice?: number | null; mine?: boolean }) =>
     setParams((p) => {
@@ -65,13 +75,38 @@ export function CalendarPage() {
   const savedCount = allNotices.filter((n) => saved.has(n.id)).length;
   const notices = mine ? allNotices.filter((n) => saved.has(n.id)) : allNotices;
   const byDay = useMemo(() => eventsByDay(notices), [notices]);
+  // Imported personal events aren't tied to the all/mine toggle — they're always "mine" — so they
+  // show up on the grid and agenda in both views.
+  const importedByDay = useMemo(() => importedEventsByDay(imported.events), [imported.events]);
+  const entriesForDay = (day: string): CalEntry[] => [
+    ...(byDay.get(day) ?? []),
+    ...(importedByDay.get(day) ?? []).map((e): CalEntry => ({ kind: 'imported', date: e.date, imported: e })),
+  ];
+  const exportable = allNotices.filter((n) => saved.has(n.id) && noticeEvents(n).length > 0);
   const cells = monthCells(year, month);
-  const monthEvents = cells.filter((c) => c.inMonth).flatMap((c) => byDay.get(c.date) ?? []);
-  const agenda = selected ? (byDay.get(selected) ?? []) : monthEvents;
+  const monthEvents = cells.filter((c) => c.inMonth).flatMap((c) => entriesForDay(c.date));
+  const agenda = selected ? entriesForDay(selected) : monthEvents;
   const pending = allNotices.filter((n) => n.analysisStatus === 'pending').length;
   const next = monthEvents.length === 0 ? nextEventAfter(notices, `${ym}-01`) : null;
   // Where the notice page's back link should return to (this exact calendar view).
   const from = `${location.pathname}${location.search}`;
+
+  const importFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      const parsed = parseIcs(text);
+      if (parsed.length === 0) {
+        setToolsMsg({ error: true, text: t.import.empty });
+        return;
+      }
+      const existing = new Set(imported.events.map((e) => e.uid));
+      const added = parsed.filter((e) => !existing.has(e.uid)).length;
+      imported.addAll(parsed);
+      setToolsMsg({ error: false, text: t.import.done(added, parsed.length) });
+    } catch {
+      setToolsMsg({ error: true, text: t.import.error });
+    }
+  };
 
   // Arriving from a notice (?notice=): bring its agenda entry into view once data is loaded.
   useEffect(() => {
@@ -123,6 +158,62 @@ export function CalendarPage() {
         )}
       </div>
 
+      <div className="cal__tools">
+        <div className="cal__tools-group" role="group" aria-label={t.export.group}>
+          <span className="cal__tools-label">{t.export.group}</span>
+          <button
+            type="button"
+            className="pill"
+            disabled={exportable.length === 0}
+            title={exportable.length === 0 ? t.export.empty : undefined}
+            onClick={() => downloadIcsMulti(exportable, lang) && setToolsMsg({ error: false, text: t.export.icsDone })}
+          >
+            {t.export.ics}
+          </button>
+          <button
+            type="button"
+            className="pill"
+            disabled={exportable.length === 0}
+            title={exportable.length === 0 ? t.export.empty : undefined}
+            onClick={() => downloadCsvBulk(exportable, lang) && setToolsMsg({ error: false, text: t.export.csvDone })}
+          >
+            {t.export.csv}
+          </button>
+        </div>
+        <div className="cal__tools-group" role="group" aria-label={t.import.group}>
+          <span className="cal__tools-label">{t.import.group}</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".ics,text/calendar"
+            className="visually-hidden"
+            tabIndex={-1}
+            aria-hidden="true"
+            onChange={(ev) => {
+              const file = ev.target.files?.[0];
+              ev.target.value = '';
+              if (file) void importFile(file);
+            }}
+          />
+          <button type="button" className="pill" onClick={() => fileInputRef.current?.click()}>
+            {t.import.button}
+          </button>
+          {imported.events.length > 0 && (
+            <button
+              type="button"
+              className="pill"
+              onClick={() => {
+                imported.clear();
+                setToolsMsg(null);
+              }}
+            >
+              {t.import.clear(imported.events.length)}
+            </button>
+          )}
+        </div>
+        {toolsMsg && <p className={`cal__tools-msg${toolsMsg.error ? ' cal__tools-msg--error' : ''}`}>{toolsMsg.text}</p>}
+      </div>
+
       {state.status === 'loading' && <StateMessage title={t.loading} />}
       {state.status === 'error' && (
         <StateMessage title={t.loadError} action={{ label: all.common.retry, onClick: state.retry }}>
@@ -138,7 +229,7 @@ export function CalendarPage() {
               </div>
             ))}
             {cells.map((c) => {
-              const events = byDay.get(c.date) ?? [];
+              const events = entriesForDay(c.date);
               const classes = [
                 'grid__cell',
                 !c.inMonth && 'grid__cell--out',
@@ -161,19 +252,27 @@ export function CalendarPage() {
                   {c.inMonth && events.length > 0 && (
                     <>
                       <ul className="grid__events">
-                        {events.slice(0, MAX_CHIPS).map((e) => (
-                          <li key={`${e.notice.id}-${e.kind}`}>
-                            <Link
-                              to={`/notices/${e.notice.id}`}
-                              state={{ from }}
-                              className={`ev ev--${e.kind}${isSaved(e.notice.id) ? ' ev--saved' : ''}${highlight === e.notice.id ? ' ev--highlight' : ''}`}
-                              data-prefix={`${isSaved(e.notice.id) ? '★ ' : ''}${all.events.short[e.kind]}`}
-                              title={`[${all.events[e.kind]}] ${noticeTitle(e.notice, lang)}`}
-                            >
-                              {noticeTitle(e.notice, lang)}
-                            </Link>
-                          </li>
-                        ))}
+                        {events.slice(0, MAX_CHIPS).map((e) =>
+                          e.kind === 'imported' ? (
+                            <li key={`imp-${e.imported.uid}`}>
+                              <span className="ev ev--imported" title={e.imported.title || t.import.untitled}>
+                                {e.imported.title || t.import.untitled}
+                              </span>
+                            </li>
+                          ) : (
+                            <li key={`${e.notice.id}-${e.kind}`}>
+                              <Link
+                                to={`/notices/${e.notice.id}`}
+                                state={{ from }}
+                                className={`ev ev--${e.kind}${isSaved(e.notice.id) ? ' ev--saved' : ''}${highlight === e.notice.id ? ' ev--highlight' : ''}`}
+                                data-prefix={`${isSaved(e.notice.id) ? '★ ' : ''}${all.events.short[e.kind]}`}
+                                title={`[${all.events[e.kind]}] ${noticeTitle(e.notice, lang)}`}
+                              >
+                                {noticeTitle(e.notice, lang)}
+                              </Link>
+                            </li>
+                          ),
+                        )}
                       </ul>
                       {events.length > MAX_CHIPS && (
                         <button type="button" className="grid__more" onClick={() => selectDay(c.date)}>
@@ -182,9 +281,13 @@ export function CalendarPage() {
                       )}
                       {/* compact markers for narrow screens */}
                       <span className="grid__dots" aria-hidden>
-                        {events.map((e) => (
-                          <i key={`${e.notice.id}-${e.kind}`} className={`dot dot--${e.kind}${highlight === e.notice.id ? ' dot--highlight' : ''}`} />
-                        ))}
+                        {events.map((e) =>
+                          e.kind === 'imported' ? (
+                            <i key={`imp-${e.imported.uid}`} className="dot dot--imported" />
+                          ) : (
+                            <i key={`${e.notice.id}-${e.kind}`} className={`dot dot--${e.kind}${highlight === e.notice.id ? ' dot--highlight' : ''}`} />
+                          ),
+                        )}
                       </span>
                     </>
                   )}
@@ -217,29 +320,42 @@ export function CalendarPage() {
               </div>
             ) : (
               <ul className="agenda__list">
-                {agenda.map((e) => (
-                  <li key={`${e.notice.id}-${e.kind}`}>
-                    <button
-                      type="button"
-                      data-notice={e.notice.id}
-                      className={`agenda__item${highlight === e.notice.id ? ' agenda__item--highlight' : ''}`}
-                      onClick={() => navigate(`/notices/${e.notice.id}`, { state: { from } })}
-                    >
-                      <span className="agenda__date">{shortDate(e.date, lang)}</span>
-                      <span className={`ev ev--${e.kind} ev--sample`}>{all.events[e.kind]}</span>
-                      <span className="agenda__name">
-                        {isSaved(e.notice.id) && (
-                          <span className="agenda__saved" title={t.savedMark} aria-label={t.savedMark}>
-                            ★{' '}
-                          </span>
-                        )}
-                        {noticeTitle(e.notice, lang)}
-                        {e.notice.analysisStatus === 'stale' && <span className="agenda__stale">{t.stale}</span>}
-                      </span>
-                      {e.kind === 'deadline' && <DdayBadge deadline={e.date} />}
-                    </button>
-                  </li>
-                ))}
+                {agenda.map((e) =>
+                  e.kind === 'imported' ? (
+                    <li key={`imp-${e.imported.uid}`}>
+                      <div className="agenda__item agenda__item--imported">
+                        <span className="agenda__date">{shortDate(e.imported.date, lang)}</span>
+                        <span className="ev ev--imported ev--sample">{t.import.mark}</span>
+                        <span className="agenda__name">{e.imported.title || t.import.untitled}</span>
+                        <button type="button" className="agenda__del" aria-label={t.import.remove} onClick={() => imported.remove(e.imported.uid)}>
+                          ×
+                        </button>
+                      </div>
+                    </li>
+                  ) : (
+                    <li key={`${e.notice.id}-${e.kind}`}>
+                      <button
+                        type="button"
+                        data-notice={e.notice.id}
+                        className={`agenda__item${highlight === e.notice.id ? ' agenda__item--highlight' : ''}`}
+                        onClick={() => navigate(`/notices/${e.notice.id}`, { state: { from } })}
+                      >
+                        <span className="agenda__date">{shortDate(e.date, lang)}</span>
+                        <span className={`ev ev--${e.kind} ev--sample`}>{all.events[e.kind]}</span>
+                        <span className="agenda__name">
+                          {isSaved(e.notice.id) && (
+                            <span className="agenda__saved" title={t.savedMark} aria-label={t.savedMark}>
+                              ★{' '}
+                            </span>
+                          )}
+                          {noticeTitle(e.notice, lang)}
+                          {e.notice.analysisStatus === 'stale' && <span className="agenda__stale">{t.stale}</span>}
+                        </span>
+                        {e.kind === 'deadline' && <DdayBadge deadline={e.date} />}
+                      </button>
+                    </li>
+                  ),
+                )}
               </ul>
             )}
           </section>

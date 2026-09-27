@@ -1,6 +1,7 @@
 import type { NoticeListItem } from '@shared/api/types.ts';
-import { noticeTitle, translations, type Lang } from './i18n.ts';
-import { noticeEvents } from './events.ts';
+import { noticeTitle, translations, type Lang, type Translations } from './i18n.ts';
+import { noticeEvents, type NoticeEvent } from './events.ts';
+import { buildCsvBulk } from './csv.ts';
 
 // "캘린더에 추가": a standard .ics file that Google / Apple / Outlook calendars import.
 // No account or backend needed. KST has no DST, so timed events convert to UTC with a fixed +9h.
@@ -34,35 +35,70 @@ function kstToUtc(d: string, addHours = 0) {
   return t.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
 }
 
-export function buildIcs(notice: NoticeListItem, lang: Lang = 'ko'): string | null {
+/** One VEVENT block for a single notice event; shared by the single-notice and bulk exports. */
+function veventBlock(notice: NoticeListItem, e: NoticeEvent, stamp: string, t: Translations, lang: Lang): string[] {
+  const timed = e.date.length > 10;
+  return [
+    'BEGIN:VEVENT',
+    `UID:inha-notice-${notice.sourceNoticeId}-${e.kind}@inha-notices`,
+    `DTSTAMP:${stamp}`,
+    ...(timed ? [`DTSTART:${kstToUtc(e.date)}`, `DTEND:${kstToUtc(e.date, 1)}`] : [`DTSTART;VALUE=DATE:${ymd(e.date)}`, `DTEND;VALUE=DATE:${nextDay(e.date)}`]),
+    `SUMMARY:${escape(`[${t.events[e.kind]}] ${noticeTitle(notice, lang)}`)}`,
+    `DESCRIPTION:${escape(`${t.ics.description}\n${t.ics.source}: ${notice.sourceUrl}`)}`,
+    `URL:${notice.sourceUrl}`,
+    'END:VEVENT',
+  ];
+}
+
+function wrapCalendar(pairs: { notice: NoticeListItem; e: NoticeEvent }[], lang: Lang): string {
   const t = translations[lang];
-  const events = noticeEvents(notice);
-  if (events.length === 0) return null;
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Inha Insight//KO', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH'];
-  for (const e of events) {
-    const timed = e.date.length > 10;
-    lines.push(
-      'BEGIN:VEVENT',
-      `UID:inha-notice-${notice.sourceNoticeId}-${e.kind}@inha-notices`,
-      `DTSTAMP:${stamp}`,
-      ...(timed ? [`DTSTART:${kstToUtc(e.date)}`, `DTEND:${kstToUtc(e.date, 1)}`] : [`DTSTART;VALUE=DATE:${ymd(e.date)}`, `DTEND;VALUE=DATE:${nextDay(e.date)}`]),
-      `SUMMARY:${escape(`[${t.events[e.kind]}] ${noticeTitle(notice, lang)}`)}`,
-      `DESCRIPTION:${escape(`${t.ics.description}\n${t.ics.source}: ${notice.sourceUrl}`)}`,
-      `URL:${notice.sourceUrl}`,
-      'END:VEVENT',
-    );
-  }
+  for (const { notice, e } of pairs) lines.push(...veventBlock(notice, e, stamp, t, lang));
   lines.push('END:VCALENDAR');
   return lines.map(fold).join('\r\n') + '\r\n';
+}
+
+export function buildIcs(notice: NoticeListItem, lang: Lang = 'ko'): string | null {
+  const events = noticeEvents(notice);
+  if (events.length === 0) return null;
+  return wrapCalendar(events.map((e) => ({ notice, e })), lang);
+}
+
+/** One .ics with every event from every given notice (e.g. all of "내 일정"), one VCALENDAR. */
+export function buildIcsMulti(notices: NoticeListItem[], lang: Lang = 'ko'): string | null {
+  const pairs = notices.flatMap((notice) => noticeEvents(notice).map((e) => ({ notice, e })));
+  if (pairs.length === 0) return null;
+  return wrapCalendar(pairs, lang);
+}
+
+function downloadBlob(content: string, mime: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export function downloadIcs(notice: NoticeListItem, lang: Lang = 'ko'): boolean {
   const ics = buildIcs(notice, lang);
   if (!ics) return false;
-  const url = URL.createObjectURL(new Blob([ics], { type: 'text/calendar;charset=utf-8' }));
-  const a = Object.assign(document.createElement('a'), { href: url, download: `inha-notice-${notice.sourceNoticeId}.ics` });
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  downloadBlob(ics, 'text/calendar;charset=utf-8', `inha-notice-${notice.sourceNoticeId}.ics`);
+  return true;
+}
+
+/** Bulk "내 일정" export as one .ics — the reliable way to bring it into Google/Apple/Outlook calendars. */
+export function downloadIcsMulti(notices: NoticeListItem[], lang: Lang = 'ko', filename = 'inha-my-events.ics'): boolean {
+  const ics = buildIcsMulti(notices, lang);
+  if (!ics) return false;
+  downloadBlob(ics, 'text/calendar;charset=utf-8', filename);
+  return true;
+}
+
+/** Bulk "내 일정" export as a CSV (spreadsheets, or Google Calendar's classic CSV import). */
+export function downloadCsvBulk(notices: NoticeListItem[], lang: Lang = 'ko', filename = 'inha-my-events.csv'): boolean {
+  const csv = buildCsvBulk(notices, lang);
+  if (!csv) return false;
+  // UTF-8 BOM so Excel opens Korean text correctly.
+  downloadBlob(`\uFEFF${csv}`, 'text/csv;charset=utf-8', filename);
   return true;
 }

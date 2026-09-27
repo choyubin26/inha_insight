@@ -52,6 +52,38 @@
   color: var(--ink-muted);
 }
 
+/* ---------- export / import toolbar ---------- */
+.cal__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin: 0 0 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.cal__tools-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.cal__tools-label {
+  font-size: var(--text-small);
+  font-style: italic;
+  color: var(--ink-muted);
+  margin-right: 2px;
+}
+.cal__tools-msg {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--accent);
+}
+.cal__tools-msg--error {
+  color: var(--urgent);
+}
+
 /* ---------- month grid ---------- */
 .grid {
   display: grid;
@@ -154,6 +186,18 @@
 .dot--event {
   border: 1.5px solid var(--hero);
 }
+.dot--imported {
+  border: 1.5px dashed var(--ink-muted);
+}
+
+/* personal events imported from an external .ics file — dashed, so "not from a notice" reads at a glance */
+.ev--imported {
+  background: var(--surface);
+  border-color: var(--ink-muted);
+  border-style: dashed;
+  color: var(--ink-muted);
+  cursor: default;
+}
 
 /* ---------- agenda ---------- */
 .agenda {
@@ -209,6 +253,26 @@
 .agenda__stale {
   color: var(--urgent);
   font-size: var(--text-tiny);
+}
+.agenda__item--imported {
+  cursor: default;
+}
+.agenda__del {
+  grid-area: dday; /* reuses the D-day badge's slot (mobile layout); unused/harmless on desktop */
+  justify-self: end;
+  width: 24px;
+  height: 24px;
+  border: 1px solid transparent;
+  border-radius: var(--pill);
+  background: none;
+  color: var(--ink-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.agenda__del:hover {
+  border-color: var(--urgent);
+  color: var(--urgent);
 }
 
 @media (max-width: 780px) {

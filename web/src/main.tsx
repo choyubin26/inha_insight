@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App.tsx';
+import { ImportedProvider } from './lib/importedEvents.tsx';
 import { LanguageProvider } from './lib/language.tsx';
 import { ProfileProvider } from './lib/profile.tsx';
 import { SavedProvider } from './lib/saved.tsx';
@@ -14,7 +15,9 @@ createRoot(document.getElementById('root')!).render(
       <LanguageProvider>
         <ProfileProvider>
           <SavedProvider>
-            <App />
+            <ImportedProvider>
+              <App />
+            </ImportedProvider>
           </SavedProvider>
         </ProfileProvider>
       </LanguageProvider>
