@@ -181,10 +181,10 @@
   border-radius: 50%;
 }
 .dot--deadline {
-  background: var(--black);
+  background: var(--cat, var(--accent));
 }
 .dot--event {
-  border: 1.5px solid var(--hero);
+  border: 1.5px solid var(--cat, var(--hero));
 }
 .dot--imported {
   border: 1.5px dashed var(--ink-muted);
